@@ -4,7 +4,7 @@ bibtexparser
 deprecated
 fake_useragent
 free-proxy
-httpx<0.28
+httpx==0.27.2
 python-dotenv
 requests[socks]
 selenium
