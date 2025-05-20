@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Optional
 from fp.fp import FreeProxy
 import random
 import logging
@@ -15,7 +15,7 @@ from selenium.common.exceptions import WebDriverException, UnexpectedAlertPresen
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from urllib.parse import urlparse
 from contextlib import contextmanager
-from deprecated import deprecated
+from deprecated import deprecated   
 try:
     import stem.process
     from stem import Signal
@@ -41,33 +41,42 @@ class MaxTriesExceededException(Exception):
     """Maximum number of tries by scholarly reached"""
 
 
-class ProxyGenerator(object):
+class ProxyGenerator:
     def __init__(self):
-        # setting up logger
         self.logger = logging.getLogger('scholarly')
-
         self._proxy_gen = None
-        # If we use a proxy or Tor, we set this to True
         self._proxy_works = False
         self.proxy_mode = None
         self._proxies = {}
-        # If we have a Tor server that we can refresh, we set this to True
         self._tor_process = None
         self._can_refresh_tor = False
         self._tor_control_port = None
         self._tor_password = None
-        self._session = None
+        self._session: Optional[httpx.Client] = None
         self._webdriver = None
         self._TIMEOUT = 5
+        self._dynamic_proxy: Optional[str] = None
         self._new_session()
 
-    def __del__(self):
-        if self._tor_process:
-            self._tor_process.kill()
-            self._tor_process.wait()
-        self._close_session()
+    def use_dynamic_proxy(self, proxy_url: Optional[str]):
+        """
+        Set or clear the dynamic proxy for HTTPX sessions.
 
-    def get_session(self):
+        :param proxy_url: Proxy URL (e.g. "http://user:pass@host:port"), or None to disable
+        """
+        self._dynamic_proxy = proxy_url
+        self._reload_session()
+
+    def _reload_session(self):
+        # Close current session and start a fresh one with new proxy
+        if self._session:
+            try:
+                self._session.close()
+            except Exception:
+                pass
+        self._new_session()
+
+    def get_session(self) -> httpx.Client:
         return self._session
 
     def Luminati(self, usr, passwd, proxy_port):
@@ -209,11 +218,51 @@ class ProxyGenerator(object):
         else:
             self._proxy_works = self._check_proxy(proxies)
 
+        self._proxy_works = self._check_proxy(proxies)
         if self._proxy_works:
             self._proxies = proxies
-            self._new_session(proxies=proxies)
-
         return self._proxy_works
+
+    def _new_session(self, **kwargs):
+        # Build transport mounts for dynamic proxy if set
+        mounts = {}
+        if self._dynamic_proxy:
+            transport = httpx.HTTPTransport(proxy=self._dynamic_proxy)
+            mounts = {
+                'http://': transport,
+                'https://': transport
+            }
+        # Compose headers
+        if FAKE_USERAGENT:
+            with self._suppress_logger('fake_useragent'):
+                user_agent = UserAgent().random
+        else:
+            user_agent = DEFAULT_USER_AGENT
+        headers = {
+            'accept-language': 'en-US,en',
+            'accept': 'text/html,application/xhtml+xml,application/xml',
+            'User-Agent': user_agent,
+        }
+        # Instantiate client with or without proxy
+        self._session = httpx.Client(
+            headers=headers,
+            follow_redirects=True,
+            mounts=mounts,
+            timeout=self._TIMEOUT
+        )
+        self._webdriver = None
+        return self._session
+
+    @staticmethod
+    @contextmanager
+    def _suppress_logger(loggerName: str, level=logging.CRITICAL):
+        logger = logging.getLogger(loggerName)
+        original = logger.getEffectiveLevel()
+        logger.setLevel(level)
+        try:
+            yield
+        finally:
+            logger.setLevel(original)
 
     @deprecated(version='1.5', reason="Tor methods are deprecated and are not actively tested.")
     def Tor_External(self, tor_sock_port: int, tor_control_port: int, tor_password: str):
@@ -483,7 +532,7 @@ class ProxyGenerator(object):
                 # ScraperAPI requests to work.
                 # https://www.scraperapi.com/documentation/
                 init_kwargs["verify"] = False
-        self._session = httpx.Client(**init_kwargs, verify=False)
+        self._session = httpx.Client(**init_kwargs, verify=False, mounts=proxies)
         self._webdriver = None
 
         return self._session
